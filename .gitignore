@@ -1,0 +1,11 @@
+# Local configuration and runtime data: never commit.
+config.toml
+fortigate-ca.pem
+state/
+logs/
+*.lock
+
+__pycache__/
+*.pyc
+.venv/
+.DS_Store

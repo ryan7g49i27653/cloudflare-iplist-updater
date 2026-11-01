@@ -1,0 +1,69 @@
+# cf-iplist-updater configuration.
+#
+#   cp config.example.toml config.toml && chmod 600 config.toml
+#
+# config.toml is gitignored and must not be readable by group/other.
+# Relative paths are relative to this file's directory.
+
+[general]
+ipv4 = true
+ipv6 = true
+state_dir = "state"
+log_dir = "logs"
+
+[cloudflare]
+# API token with only: Account > Account Filter Lists > Edit (scoped to one account).
+api_token = "REPLACE_ME"
+account_id = "REPLACE_ME"
+# Dashboard: Manage Account > Configurations > Lists; the ID is in the list's URL.
+list_id = "REPLACE_ME"
+# Items whose comment contains this text are managed; everything else is left alone.
+comment_marker = "managed-by:cf-iplist-updater"
+timeout = 15
+
+[fortigate]
+enabled = true
+# Use the name on the certificate (e.g. Let's Encrypt) so TLS verification passes.
+host = "fortigate.example.internal"
+port = 443
+# REST API admin with a read-only profile; trusted host = this server only.
+api_token = "REPLACE_ME"
+# WAN interface whose IPv4 address is allowlisted.
+wan_interface = "wan1"
+# Delegated IPv6 prefixes are the global connected routes on these interfaces
+# (from the IPv6 routing table). Empty = every interface except the WAN.
+lan_interfaces = []
+# Optional PEM bundle added to the system trust store, e.g. intermediates the
+# FortiGate doesn't send (see README "FortiGate TLS"). Relative to this file.
+ca_file = ""
+verify_tls = true
+timeout = 10
+
+[echo]
+# Single-stack IP echo services, used only when the FortiGate can't answer.
+quorum = 2
+timeout = 8
+ipv4_services = [
+    "https://api.ipify.org",
+    "https://ipv4.icanhazip.com",
+    "https://1.1.1.1/cdn-cgi/trace",
+]
+ipv6_services = [
+    "https://api6.ipify.org",
+    "https://ipv6.icanhazip.com",
+    "https://[2606:4700:4700::1111]/cdn-cgi/trace",
+]
+
+[ipv6]
+# Only used when the FortiGate is unreachable AND the echoed IPv6 address is in a
+# new prefix: the address is masked to this length. 0 = length of the last known
+# delegated prefix.
+fallback_prefix_length = 0
+
+[healthchecks]
+# Healthchecks.io ping URL (https://hc-ping.com/<uuid>). Empty disables pings.
+ping_url = ""
+# Consecutive failed runs before sending /fail (alerts immediately). Earlier
+# failures are sent to /log, which records details without alerting.
+failure_threshold = 3
+timeout = 10
