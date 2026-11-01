@@ -11,7 +11,8 @@ reports to [Healthchecks.io](https://healthchecks.io).
 Each run:
 
 1. **IPv4** is read from the FortiGate's WAN interface
-   (`GET /api/v2/monitor/system/interface`). If the FortiGate is unreachable or
+   (`GET /api/v2/monitor/system/interface`, with `include_vlan` and
+   `include_aggregate` so VLAN and redundant/aggregate WANs are found). If the FortiGate is unreachable or
    reports a non-public address, IP echo services are used instead. At least
    `quorum` of them must agree.
 2. **IPv6 delegated prefixes** are read from the FortiGate's IPv6 routing table
@@ -47,9 +48,13 @@ Each run:
 ### Cloudflare
 1. Create an IP List: *Manage Account → Configurations → Lists* (type **IP**).
    The list ID is in its URL.
-2. Create an API token: *My Profile → API Tokens → Custom token*, permission
-   **Account → Account Filter Lists → Edit**, scoped to that one account.
-   Optionally restrict it to your client IPs.
+2. Create an API token (*Manage Account → Account API Tokens*, or
+   *My Profile → API Tokens*) → *Custom token*, permission
+   **Rules & Configuration → Account Rule Lists → Edit** (formerly "Account
+   Filter Lists"), scoped to that one account. Search the permission groups
+   for `list` to find it.
+   **Don't** set Client IP Address Filtering: the token is used precisely when
+   your IP has just changed, so an IP-restricted token would lock itself out.
 
 ### FortiGate (FortiOS 7.x)
 1. Create a REST API admin: *System → Administrators → Create New → REST API Admin*.
@@ -86,8 +91,9 @@ replaces the system store, can use the same file:
 cd /usr/local/scripts/cloudflare-iplist-updater
 { curl -fsS https://letsencrypt.org/certs/gen-y/int-ye2.pem \
        https://letsencrypt.org/certs/gen-y/root-ye-by-x2.pem
-  cat /etc/ssl/certs/ISRG_Root_X2.pem; } | sudo tee fortigate-ca.pem >/dev/null
+  cat /etc/ssl/certs/ISRG_Root_X2.pem; } > fortigate-ca.pem
 ```
+The file holds only public certificates. It must be readable by the account cron runs as.
 
 Then set `ca_file = "fortigate-ca.pem"` in `[fortigate]`. Use the intermediate
 matching your certificate's issuer (`YE1`/`YE2`/`YE3`, or `YR1`–`YR3` for RSA);
@@ -99,29 +105,127 @@ update the file. Fixing the chain on the FortiGate avoids that.
 
 ### Healthchecks.io
 Create a check:
-- **Period** 15 minutes
-- **Grace** about 45 minutes
-- An integration of your choice (mobile app, Pushover, Discord, SMS, …)
+- **Period:** 15 minutes, matching the cron schedule.
+- **Grace:** about 30 minutes.
+- **Integration:** enable at least one (mobile app, Pushover, Discord, SMS, …).
+  Without one, the check turns red but nobody is told. Use the integration's
+  **Test** button to confirm delivery.
 
 Put its ping URL in `config.toml`.
 
+There are two alert paths, and with these settings both fire about 45 minutes
+after the last good run:
+
+| Failure | Behaviour |
+| --- | --- |
+| The script runs but fails | Failures are sent to `/log`, which records the error without alerting. The `failure_threshold`-th consecutive failure (default 3) sends `/fail`, which alerts immediately. |
+| The script doesn't run (server down, cron broken) | No pings arrive. Healthchecks alerts after period + grace. |
+
+Keep grace ≈ (`failure_threshold` − 1) × 15 minutes so the two paths line up.
+A new check stays quiet until its first ping. `--check` sends a `/log` event,
+which doesn't count as a success.
+
 ### Server
+The script needs no root privileges. Run it as an unprivileged account, and run
+your manual tests **as the same account cron uses**. The script creates
+`state/` and `logs/` on its first run, so if they end up owned by a different
+user, every scheduled run fails.
+
+Clone it into a directory of your choice. This README uses
+`/usr/local/scripts/cloudflare-iplist-updater`:
+
 ```bash
-sudo git clone git@github.com:<you>/cloudflare-iplist-updater.git /usr/local/scripts/cloudflare-iplist-updater
+sudo git clone https://github.com/<owner>/cloudflare-iplist-updater.git /usr/local/scripts/cloudflare-iplist-updater
 cd /usr/local/scripts/cloudflare-iplist-updater
-sudo deploy/install.sh               # service user, state/logs dirs, config.toml, cron.d
-sudoedit config.toml
-sudo -u cfipupdater python3 -m cf_iplist_updater --check
-sudo -u cfipupdater python3 -m cf_iplist_updater --dry-run
-sudo -u cfipupdater python3 -m cf_iplist_updater
 ```
-Cron (`/etc/cron.d/cloudflare-iplist-updater`) runs it every 15 minutes.
 
-**Logs:**
-- `logs/cf-iplist-updater.log` (rotated)
-- `state/state.json` holds the last result, the cached prefix length and the failure count.
+Then choose one of the following.
 
-**Updating:** run `git pull` in the app directory. Your config, state and logs are gitignored.
+#### Option A: dedicated service user (recommended)
+`deploy/install.sh` is a short, idempotent helper. It:
+- creates a `cfipupdater` system user with no login shell and no home directory;
+- creates `state/` and `logs/` owned by that user (mode 0700);
+- copies `config.example.toml` to `config.toml` (mode 0600, owned by that user);
+- installs `/etc/cron.d/cloudflare-iplist-updater`.
+
+Code stays owned by whoever cloned it, so the service user can't modify it.
+Override the user name with `SERVICE_USER=name`.
+
+```bash
+sudo deploy/install.sh
+sudoedit config.toml
+```
+Prefix the test commands below with `sudo -u cfipupdater`.
+
+#### Option B: an existing account, without the installer
+For an existing account (e.g. your own), the account must own the directory:
+
+```bash
+sudo chown -R "$USER": /usr/local/scripts/cloudflare-iplist-updater
+cp config.example.toml config.toml && chmod 600 config.toml
+$EDITOR config.toml
+crontab -e
+```
+
+Add this crontab line:
+```
+7-59/15 * * * * cd /usr/local/scripts/cloudflare-iplist-updater && /usr/bin/python3 -m cf_iplist_updater >/dev/null 2>&1
+```
+Run the test commands below without a prefix.
+
+### Configure
+Edit `config.toml`; every key is documented in `config.example.toml`. At minimum:
+
+- **`[cloudflare]`:** `api_token`, `account_id`, `list_id`. The list ID is also
+  returned by `GET /accounts/<account_id>/rules/lists`.
+- **`[fortigate]`:** `host` (the name on its certificate), `port`, `api_token`,
+  `wan_interface`, and `ca_file` if needed (see [FortiGate TLS](#fortigate-tls)).
+- **`[healthchecks]`:** `ping_url`.
+
+`config.toml` must be mode 0600; the script refuses to read it otherwise.
+
+### Test the deployment
+Run these from the app directory, as the account cron uses. Each is safe to repeat.
+
+1. **Check connectivity.** Nothing is changed.
+   ```bash
+   python3 -m cf_iplist_updater --check
+   ```
+   Every line should read `OK`: the FortiGate WAN IPv4 and delegated IPv6
+   prefixes, both echo families, the Cloudflare list (kind `ip`), the managed
+   items, and the Healthchecks `/log` ping. Each `FAIL` line names the
+   dependency at fault.
+
+2. **Preview the changes.** Nothing is written and Healthchecks isn't pinged.
+   ```bash
+   python3 -m cf_iplist_updater --dry-run -v
+   ```
+   On a first run, expect `[dry-run] add …` lines for your IPv4 address and
+   each delegated prefix.
+
+3. **Do a real run.** This is exactly what cron runs.
+   ```bash
+   python3 -m cf_iplist_updater -v; echo "exit=$?"
+   ```
+   Expect `exit=0`. The new list entries have comments starting with
+   `managed-by:cf-iplist-updater`, and existing manual entries are untouched.
+   The Healthchecks check turns green. A second run should log
+   `Cloudflare list already up to date`.
+
+4. After the next scheduled run (:07, :22, :37 or :52), confirm it in the
+   Healthchecks event log or in `logs/cf-iplist-updater.log`.
+
+### Files
+| Path | Contents |
+| --- | --- |
+| `config.toml` | Your settings and secrets (gitignored, 0600) |
+| `fortigate-ca.pem` | Optional CA bundle (gitignored) |
+| `logs/cf-iplist-updater.log` | Run log, rotated at 1 MB × 5 |
+| `state/state.json` | Last-known addresses per family, last change, consecutive-failure count |
+| `state/run.lock` | Prevents overlapping runs |
+
+**Updating:** run `git pull` in the app directory. Your config, CA bundle, state
+and logs are gitignored.
 
 ## Usage
 
@@ -142,6 +246,19 @@ Exit codes:
 - `1` run failed
 - `2` config error
 - `75` another run is in progress
+
+## Troubleshooting
+
+| Symptom | Likely cause |
+| --- | --- |
+| `unable to get local issuer certificate` (FortiGate) | The FortiGate doesn't send its intermediate certificate; see [FortiGate TLS](#fortigate-tls) |
+| FortiGate `HTTP 403` | The API admin profile lacks Read access to System/Network, or this server isn't in the admin's Trusted Hosts |
+| `interface '…' not in monitor response` | Wrong `wan_interface` name (it's case-sensitive) |
+| Cloudflare `[10000] Authentication error` | Token is missing **Account Rule Lists → Edit**, is scoped to another account, or is IP-restricted |
+| Cloudflare `[7003] Could not route…` | Wrong `account_id` or `list_id` |
+| Works manually, fails from cron | Manual runs and cron use different accounts, so `state/`, `logs/` or `config.toml` are owned by the other one. `chown` them to the cron account |
+| `config error: … mode -rw-r--r--` | Run `chmod 600 config.toml` |
+| IPv6 comes from echo services instead of the FortiGate | No global connected IPv6 route on a non-WAN interface; check `--dump-fortigate` and `lan_interfaces` |
 
 ## Development
 

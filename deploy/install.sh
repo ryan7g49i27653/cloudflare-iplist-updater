@@ -3,8 +3,10 @@
 #
 #   sudo deploy/install.sh
 #
+# Optional helper for running as a dedicated service user (README "Option A").
 # Idempotent: creates the service user, private state/logs directories,
-# config.toml (from the example, if missing) and the cron.d entry.
+# config.toml (from the example, if missing) and the cron.d entry. To run as an
+# existing account instead, follow README "Option B" and skip this script.
 set -euo pipefail
 
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

@@ -12,7 +12,8 @@ state_dir = "state"
 log_dir = "logs"
 
 [cloudflare]
-# API token with only: Account > Account Filter Lists > Edit (scoped to one account).
+# API token with only: Rules & Configuration > Account Rule Lists > Edit
+# (formerly "Account Filter Lists"), scoped to one account. No IP filtering.
 api_token = "REPLACE_ME"
 account_id = "REPLACE_ME"
 # Dashboard: Manage Account > Configurations > Lists; the ID is in the list's URL.
@@ -26,9 +27,11 @@ enabled = true
 # Use the name on the certificate (e.g. Let's Encrypt) so TLS verification passes.
 host = "fortigate.example.internal"
 port = 443
-# REST API admin with a read-only profile; trusted host = this server only.
+# REST API admin whose profile has Read (not Read/Write) on System and Network;
+# trusted host = this server only.
 api_token = "REPLACE_ME"
-# WAN interface whose IPv4 address is allowlisted.
+# WAN interface whose IPv4 address is allowlisted (case-sensitive; physical,
+# VLAN, and redundant/aggregate interfaces all work).
 wan_interface = "wan1"
 # Delegated IPv6 prefixes are the global connected routes on these interfaces
 # (from the IPv6 routing table). Empty = every interface except the WAN.
@@ -65,5 +68,6 @@ fallback_prefix_length = 0
 ping_url = ""
 # Consecutive failed runs before sending /fail (alerts immediately). Earlier
 # failures are sent to /log, which records details without alerting.
+# Keep the check's grace time ~ (failure_threshold - 1) x 15 min (period 15 min).
 failure_threshold = 3
 timeout = 10
