@@ -11,7 +11,11 @@ log = logging.getLogger(__name__)
 def load(path):
     try:
         with open(path) as f:
-            return json.load(f)
+            data = json.load(f)
+        if not isinstance(data, dict):
+            log.warning("ignoring state file %s: not a JSON object", path)
+            return {}
+        return data
     except FileNotFoundError:
         return {}
     except (OSError, ValueError) as e:

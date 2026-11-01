@@ -31,6 +31,7 @@ class Healthchecks:
         try:
             httpclient.request("POST", f"{self.url}{suffix}",
                                data=message.encode()[:MAX_BODY], timeout=self.timeout,
-                               retries=2, label=f"healthchecks{suffix or '/success'}")
+                               retries=2, label=f"healthchecks{suffix or '/success'}",
+                               max_bytes=10_000)
         except httpclient.HTTPError as e:
             log.error("Healthchecks ping failed: %s", e)

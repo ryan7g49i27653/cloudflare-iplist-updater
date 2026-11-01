@@ -1,23 +1,42 @@
-"""Load and validate config.toml."""
+"""Load and validate config.toml.
 
+Every value is type-checked against its field annotation, and values that end
+up in URLs or HTTP headers are checked against strict patterns.
+"""
+
+import logging
 import os
+import re
 import stat
 import tomllib
-from dataclasses import dataclass, field
+import urllib.parse
+from dataclasses import dataclass, field, fields
 from pathlib import Path
+
+from . import untrusted
+
+log = logging.getLogger(__name__)
 
 PLACEHOLDER = "REPLACE_ME"
 
+# One service per independent operator (ipify, ident.me, Cloudflare), so a
+# quorum of 2 needs two different operators to agree.
 DEFAULT_IPV4_SERVICES = [
     "https://api.ipify.org",
-    "https://ipv4.icanhazip.com",
+    "https://v4.ident.me",
     "https://1.1.1.1/cdn-cgi/trace",
 ]
 DEFAULT_IPV6_SERVICES = [
     "https://api6.ipify.org",
-    "https://ipv6.icanhazip.com",
+    "https://v6.ident.me",
     "https://[2606:4700:4700::1111]/cdn-cgi/trace",
 ]
+
+_HOST = re.compile(r"\A(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*"
+                   r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\Z")
+_INTERFACE = re.compile(r"\A[A-Za-z0-9._-]{1,35}\Z")
+_TOKEN = re.compile(r"\A[A-Za-z0-9._~+/=-]{8,512}\Z")
+_MARKER = re.compile(r"\A[ -~]{8,100}\Z")
 
 
 class ConfigError(Exception):
@@ -85,14 +104,32 @@ class Config:
     healthchecks: Healthchecks
 
 
+def _type_ok(value, annotation):
+    if annotation is bool:
+        return isinstance(value, bool)
+    if annotation is int:
+        return isinstance(value, int) and not isinstance(value, bool)
+    if annotation is float:
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if annotation in (str, Path):
+        return isinstance(value, str)
+    if annotation is list:
+        return isinstance(value, list) and all(isinstance(v, str) for v in value)
+    return False
+
+
 def _section(cls, raw, name):
     data = raw.get(name, {})
     if not isinstance(data, dict):
         raise ConfigError(f"[{name}] must be a table")
-    known = set(cls.__dataclass_fields__)
-    unknown = set(data) - known
+    types = {f.name: f.type for f in fields(cls)}
+    unknown = set(data) - set(types)
     if unknown:
         raise ConfigError(f"unknown key(s) in [{name}]: {', '.join(sorted(unknown))}")
+    for key, value in data.items():
+        if not _type_ok(value, types[key]):
+            expected = "list of strings" if types[key] is list else types[key].__name__
+            raise ConfigError(f"[{name}] {key} must be a {expected}")
     return cls(**data)
 
 
@@ -168,5 +205,61 @@ def validate(cfg):
         raise ConfigError("[ipv6] fallback_prefix_length must be set when FortiGate is disabled")
     if cfg.healthchecks.failure_threshold < 1:
         raise ConfigError("[healthchecks] failure_threshold must be >= 1")
-    if cfg.healthchecks.ping_url and not cfg.healthchecks.ping_url.startswith("https://"):
-        raise ConfigError("[healthchecks] ping_url must be an https:// URL")
+    validate_values(cfg)
+
+
+def _https_url(section, key, url):
+    parts = urllib.parse.urlsplit(url)
+    if (parts.scheme != "https" or not parts.hostname or "@" in parts.netloc
+            or parts.fragment or any(not " " < c <= "~" for c in url)):
+        raise ConfigError(f"[{section}] {key}: must be a plain https:// URL "
+                          f"(got {untrusted.describe(url, 60)})")
+
+
+def _pattern(section, key, value, pattern, what):
+    if not pattern.match(value):
+        raise ConfigError(f"[{section}] {key} is not a valid {what}")
+
+
+def validate_values(cfg):
+    """Strict checks on values that end up in URLs, headers or deletions."""
+    cf, fg, hc = cfg.cloudflare, cfg.fortigate, cfg.healthchecks
+    for key in ("account_id", "list_id"):
+        try:
+            untrusted.opaque_id(getattr(cf, key))
+        except untrusted.UntrustedDataError:
+            raise ConfigError(f"[cloudflare] {key} is not a valid ID") from None
+    _pattern("cloudflare", "api_token", cf.api_token, _TOKEN, "token")
+    # Items are deleted when their comment contains the marker, so a short or
+    # generic marker could match (and remove) entries added by hand.
+    _pattern("cloudflare", "comment_marker", cf.comment_marker, _MARKER,
+             "marker (8-100 printable ASCII characters)")
+
+    if fg.enabled:
+        host = fg.host[1:-1] if fg.host.startswith("[") and fg.host.endswith("]") else fg.host
+        try:
+            untrusted.ip_address(host)
+        except untrusted.UntrustedDataError:
+            _pattern("fortigate", "host", host, _HOST, "hostname or IP address")
+        if not 1 <= fg.port <= 65535:
+            raise ConfigError("[fortigate] port must be 1-65535")
+        _pattern("fortigate", "api_token", fg.api_token, _TOKEN, "token")
+        _pattern("fortigate", "wan_interface", fg.wan_interface, _INTERFACE, "interface name")
+        for name in fg.lan_interfaces:
+            _pattern("fortigate", "lan_interfaces", name, _INTERFACE, "interface name")
+        if not fg.verify_tls:
+            log.warning("[fortigate] verify_tls = false: the FortiGate API token is sent "
+                        "without certificate verification")
+
+    for key in ("ipv4_services", "ipv6_services"):
+        for url in getattr(cfg.echo, key):
+            _https_url("echo", key, url)
+    if cfg.echo.quorum < 2:
+        log.warning("[echo] quorum = 1: a single echo service can decide the fallback address")
+    if hc.ping_url:
+        _https_url("healthchecks", "ping_url", hc.ping_url)
+
+    for section, obj in (("cloudflare", cf), ("fortigate", fg), ("echo", cfg.echo),
+                         ("healthchecks", hc)):
+        if not 0 < obj.timeout <= 120:
+            raise ConfigError(f"[{section}] timeout must be between 0 and 120 seconds")

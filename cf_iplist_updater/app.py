@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import __version__, config, detect_web, reconcile, state
+from . import __version__, config, detect_web, reconcile, state, untrusted
 from .addresses import cf_acceptable, is_public, parse_network, prefix_for, to_cf
 from .cloudflare import CloudflareClient, CloudflareError
 from .detect_fortigate import FortiGateClient, FortiGateError
@@ -160,7 +160,7 @@ def run(cfg, dry_run=False):
         _error(det, f"Cloudflare: {e}")
     except Exception as e:  # noqa: BLE001 - always report to Healthchecks
         log.exception("unexpected error")
-        det.errors.append(f"unexpected error: {e!r}")
+        det.errors.append(f"unexpected error: {untrusted.describe(e, 200)}")
 
     summary = "\n".join(
         [f"cf-iplist-updater {__version__}"]
@@ -180,7 +180,10 @@ def run(cfg, dry_run=False):
             known[str(version)] = [to_cf(n) for n in nets]
     if changes:
         st["last_change"] = now
-    failures = st.get("consecutive_failures", 0) + 1 if det.errors else 0
+    previous = st.get("consecutive_failures")
+    if not isinstance(previous, int) or isinstance(previous, bool) or previous < 0:
+        previous = 0
+    failures = previous + 1 if det.errors else 0
     st["consecutive_failures"] = failures
     try:
         state.save(state_path, st)
@@ -207,10 +210,10 @@ def check(cfg):
     def report(name, fn):
         nonlocal ok
         try:
-            print(f"  OK    {name}: {fn()}")
+            print(f"  OK    {name}: {untrusted.describe(str(fn()), 300)}")
         except Exception as e:  # noqa: BLE001
             ok = False
-            print(f"  FAIL  {name}: {e}")
+            print(f"  FAIL  {name}: {untrusted.describe(str(e), 300)}")
 
     print("FortiGate:" if cfg.fortigate.enabled else "FortiGate: disabled")
     if cfg.fortigate.enabled:
@@ -273,12 +276,25 @@ def dump_fortigate(cfg):
     return EXIT_OK
 
 
+class EscapeFilter(logging.Filter):
+    """Escape control and non-ASCII characters in every log message, so text that
+    originated outside (error strings, response fragments) can't forge log lines
+    or inject terminal escape sequences."""
+
+    def filter(self, record):
+        record.msg = untrusted.describe(record.getMessage(), 2000)
+        record.args = None
+        return True
+
+
 def setup_logging(cfg, verbose):
     root = logging.getLogger()
     root.setLevel(logging.DEBUG if verbose else logging.INFO)
     fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
 
+    escape = EscapeFilter()
     console = logging.StreamHandler()
+    console.addFilter(escape)
     console.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
     console.setLevel(logging.DEBUG if verbose else
                      logging.INFO if sys.stderr.isatty() else logging.WARNING)
@@ -289,6 +305,7 @@ def setup_logging(cfg, verbose):
         fh = logging.handlers.RotatingFileHandler(
             cfg.general.log_dir / "cf-iplist-updater.log", maxBytes=1_000_000, backupCount=5)
         fh.setFormatter(fmt)
+        fh.addFilter(escape)
         fh.setLevel(logging.DEBUG if verbose else logging.INFO)
         root.addHandler(fh)
     except OSError as e:

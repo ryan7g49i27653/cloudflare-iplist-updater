@@ -2,6 +2,8 @@
 
 import ipaddress
 
+from . import untrusted
+
 # Cloudflare IP Lists accept IPv4 /8-/32 and IPv6 /12-/64 (or a single /128).
 CF_V4_RANGE = (8, 32)
 CF_V6_RANGE = (12, 64)
@@ -13,8 +15,11 @@ def is_public(addr):
 
 
 def parse_network(value):
-    """Parse a list-item 'ip' value ('192.0.2.1', '2001:db8::/48') into a network."""
-    return ipaddress.ip_network(value.strip(), strict=False)
+    """Strictly parse a list-item 'ip' value ('192.0.2.1', '2001:db8::/48').
+
+    Raises untrusted.UntrustedDataError (a ValueError) on anything else.
+    """
+    return untrusted.ip_network(value)
 
 
 def to_cf(net):

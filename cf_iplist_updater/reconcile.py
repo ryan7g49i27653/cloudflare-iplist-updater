@@ -3,6 +3,7 @@
 import logging
 from dataclasses import dataclass, field
 
+from . import untrusted
 from .addresses import parse_network
 
 log = logging.getLogger(__name__)
@@ -20,7 +21,8 @@ class Plan:
 
 
 def is_managed(item, marker):
-    return marker in (item.get("comment") or "")
+    comment = item.get("comment")
+    return isinstance(comment, str) and marker in comment
 
 
 def plan(desired, items, marker):
@@ -38,9 +40,9 @@ def plan(desired, items, marker):
         if not is_managed(item, marker):
             continue
         try:
-            net = parse_network(item["ip"])
-        except (KeyError, ValueError):
-            log.warning("ignoring managed item with unparsable ip: %r", item.get("ip"))
+            net = parse_network(item.get("ip"))
+        except ValueError as e:
+            log.warning("ignoring managed item %s: %s", untrusted.describe(item.get("id"), 40), e)
             continue
         wanted = desired.get(net.version)
         if wanted is None or (net in wanted and net not in seen):

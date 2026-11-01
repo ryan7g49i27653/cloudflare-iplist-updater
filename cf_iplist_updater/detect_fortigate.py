@@ -10,11 +10,10 @@
   as a delegated prefix.
 """
 
-import ipaddress
 import logging
 import urllib.parse
 
-from . import httpclient
+from . import httpclient, untrusted
 from .addresses import is_public
 
 log = logging.getLogger(__name__)
@@ -25,8 +24,10 @@ class FortiGateError(Exception):
 
 
 def _check_status(payload, what):
-    if payload.get("status") == "error":
-        raise FortiGateError(f"{what}: API error HTTP {payload.get('http_status')} "
+    if payload.get("status") != "success":
+        status = payload.get("http_status")
+        status = status if isinstance(status, int) else "?"
+        raise FortiGateError(f"{what}: API error HTTP {status} "
                              "(403 = admin profile lacks read access)")
 
 
@@ -37,15 +38,19 @@ def parse_wan_ipv4(payload, interface):
     if isinstance(results, dict):
         entry = results.get(interface)
     elif isinstance(results, list):
-        entry = next((r for r in results if r.get("name") == interface), None)
+        entry = next((r for r in results
+                      if isinstance(r, dict) and r.get("name") == interface), None)
     else:
         entry = None
-    if not entry:
+    if not isinstance(entry, dict):
         raise FortiGateError(f"interface {interface!r} not in monitor response")
     ip = entry.get("ip")
     if not ip or ip == "0.0.0.0":
         raise FortiGateError(f"interface {interface!r} has no IPv4 address")
-    return ipaddress.IPv4Address(ip)
+    try:
+        return untrusted.ip_address(ip, 4)
+    except untrusted.UntrustedDataError as e:
+        raise FortiGateError(f"interface {interface!r} IPv4 rejected: {e}") from None
 
 
 def parse_delegated_prefixes(payload, wan_interface, lan_interfaces=()):
@@ -55,15 +60,20 @@ def parse_delegated_prefixes(payload, wan_interface, lan_interfaces=()):
     """
     _check_status(payload, "monitor/router/ipv6")
     nets = set()
-    for route in payload.get("results") or []:
+    routes = payload.get("results")
+    if not isinstance(routes, list):
+        raise FortiGateError("monitor/router/ipv6: unexpected response shape")
+    for route in routes:
+        if not isinstance(route, dict):
+            continue
         iface = route.get("interface")
         if route.get("type") != "connect" or iface == wan_interface:
             continue
         if lan_interfaces and iface not in lan_interfaces:
             continue
         try:
-            net = ipaddress.IPv6Network(route.get("ip_mask", ""), strict=False)
-        except ValueError:
+            net = untrusted.ip_network(route.get("ip_mask"), 6)
+        except untrusted.UntrustedDataError:
             continue
         if net.prefixlen < 128 and is_public(net.network_address):
             nets.add(net)
@@ -73,7 +83,8 @@ def parse_delegated_prefixes(payload, wan_interface, lan_interfaces=()):
 class FortiGateClient:
     def __init__(self, cfg):
         self.cfg = cfg
-        self.base = f"https://{cfg.host}:{cfg.port}/api/v2"
+        host = f"[{cfg.host}]" if ":" in cfg.host and not cfg.host.startswith("[") else cfg.host
+        self.base = f"https://{host}:{cfg.port}/api/v2"
         self.ssl = httpclient.make_ssl_context(cfg.ca_file, cfg.verify_tls)
 
     def get(self, path, params=None):

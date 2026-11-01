@@ -18,7 +18,8 @@ api_token = "REPLACE_ME"
 account_id = "REPLACE_ME"
 # Dashboard: Manage Account > Configurations > Lists; the ID is in the list's URL.
 list_id = "REPLACE_ME"
-# Items whose comment contains this text are managed; everything else is left alone.
+# Items whose comment contains this text are managed (and may be deleted);
+# everything else is left alone. 8-100 printable ASCII characters; keep it unique.
 comment_marker = "managed-by:cf-iplist-updater"
 timeout = 15
 
@@ -44,16 +45,20 @@ timeout = 10
 
 [echo]
 # Single-stack IP echo services, used only when the FortiGate can't answer.
+# Their answers are untrusted: each must be HTTP 200 text/plain, <= 1 KB of
+# printable ASCII holding exactly one address, and `quorum` of them must agree.
+# Use services run by different operators (here: ipify, ident.me, Cloudflare);
+# icanhazip.com is also Cloudflare, so it would not add independence.
 quorum = 2
 timeout = 8
 ipv4_services = [
     "https://api.ipify.org",
-    "https://ipv4.icanhazip.com",
+    "https://v4.ident.me",
     "https://1.1.1.1/cdn-cgi/trace",
 ]
 ipv6_services = [
     "https://api6.ipify.org",
-    "https://ipv6.icanhazip.com",
+    "https://v6.ident.me",
     "https://[2606:4700:4700::1111]/cdn-cgi/trace",
 ]
 

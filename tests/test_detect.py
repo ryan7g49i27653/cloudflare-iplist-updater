@@ -15,8 +15,8 @@ def always_public(addr):
 @mock.patch.object(detect_web, "is_public", always_public)
 class EchoTests(unittest.TestCase):
     def test_parse_plain_and_trace(self):
-        self.assertEqual(detect_web.parse_echo("192.0.2.10\n"), A("192.0.2.10"))
-        trace = "fl=1\nh=1.1.1.1\nip=2001:db8::5\nts=1\n"
+        self.assertEqual(detect_web.parse_echo(b"192.0.2.10\n"), A("192.0.2.10"))
+        trace = b"fl=1\nh=1.1.1.1\nip=2001:db8::5\nts=1\n"
         self.assertEqual(detect_web.parse_echo(trace), A("2001:db8::5"))
 
     def test_quorum_reached(self):
@@ -44,21 +44,22 @@ class NonPublicTests(unittest.TestCase):
 
 class FortiGateParseTests(unittest.TestCase):
     def test_monitor_dict_shape(self):
-        payload = {"results": {"wan1": {"name": "wan1", "ip": "192.0.2.10", "mask": 24}}}
+        payload = {"status": "success",
+                   "results": {"wan1": {"name": "wan1", "ip": "192.0.2.10", "mask": 24}}}
         self.assertEqual(fgmod.parse_wan_ipv4(payload, "wan1"), A("192.0.2.10"))
 
     def test_monitor_list_shape(self):
-        payload = {"results": [{"name": "wan1", "ip": "192.0.2.10"}]}
+        payload = {"status": "success", "results": [{"name": "wan1", "ip": "192.0.2.10"}]}
         self.assertEqual(fgmod.parse_wan_ipv4(payload, "wan1"), A("192.0.2.10"))
 
     def test_monitor_no_address(self):
-        payload = {"results": {"wan1": {"name": "wan1", "ip": "0.0.0.0"}}}
+        payload = {"status": "success", "results": {"wan1": {"name": "wan1", "ip": "0.0.0.0"}}}
         with self.assertRaises(fgmod.FortiGateError):
             fgmod.parse_wan_ipv4(payload, "wan1")
 
     def test_monitor_missing_interface(self):
         with self.assertRaises(fgmod.FortiGateError):
-            fgmod.parse_wan_ipv4({"results": {}}, "wan1")
+            fgmod.parse_wan_ipv4({"status": "success", "results": {}}, "wan1")
 
     def test_monitor_api_error(self):
         payload = {"http_method": "GET", "status": "error", "http_status": 403}

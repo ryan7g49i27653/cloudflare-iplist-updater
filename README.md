@@ -43,6 +43,56 @@ Each run:
 - Only globally routable addresses are accepted (no RFC 1918, CGNAT or ULA).
 - IPv6 prefixes must fit Cloudflare's accepted /12–/64 range.
 
+## Security model
+
+**Trust levels:**
+- **The FortiGate and Cloudflare** are trusted, but their responses are still shape-checked.
+- **IP echo services** are untrusted.
+
+**Validation of what comes back.** All network input goes through
+`cf_iplist_updater/untrusted.py`:
+- **Allowlist, not cleanup.** Values must be the exact type, characters and
+  length expected; anything else is rejected rather than repaired. Addresses must be
+  plain dotted-quad or hex-and-colon strings. Integers, IPv6 scope IDs
+  (`%eth0`), IPv4-mapped forms, whitespace and non-ASCII digits are all
+  rejected before `ipaddress` parses them.
+- **Re-serialization.** Only the canonical form produced by `ipaddress` is
+  sent to Cloudflare, logged or reported, never the raw response text.
+- **Echo responses** must be HTTP 200 and `text/plain`, at most 1 KB of
+  printable ASCII, and contain exactly one address (or exactly one `ip=` line
+  in Cloudflare's trace format). The address must be globally routable, and
+  `quorum` services from different operators must agree. The defaults are
+  ipify, ident.me and Cloudflare.
+- **IDs from Cloudflare** (item and operation IDs) are checked against
+  `[A-Za-z0-9_-]{1,64}` before they're used in a URL or request body, so a
+  response can't steer requests to other API paths.
+- **Error messages** never include rejected input. Every log message is
+  escaped to printable ASCII, so control characters, terminal escape
+  sequences and fake log lines can't get through.
+
+**HTTP.**
+- HTTPS only, with TLS 1.2 or later and certificate verification.
+- Redirects are refused, because urllib would otherwise forward the
+  `Authorization` header to any host a redirect points at.
+- Responses are size-capped: 1 KB for echo services, 2 MB for APIs.
+
+**Configuration.**
+- `config.toml` must be mode 0600.
+- Every key is type-checked.
+- Hosts, ports, IDs, tokens, interface names and URLs are checked against
+  strict patterns, so they can't inject into URLs or headers.
+- `comment_marker` must be at least 8 characters, so it can't accidentally
+  match entries you added by hand.
+
+**What the code never does:** run shell commands, `eval` or deserialize
+anything except JSON and TOML, or build file paths from network data.
+
+**Things to be aware of:**
+- Healthchecks ping bodies include the desired addresses, i.e. your public IPs.
+- The echo services see your public IP addresses (only on fallback).
+- `verify_tls = false` and `quorum = 1` are allowed but log a warning.
+- Standard `https_proxy` environment variables are honoured.
+
 ## Setup
 
 ### Cloudflare
